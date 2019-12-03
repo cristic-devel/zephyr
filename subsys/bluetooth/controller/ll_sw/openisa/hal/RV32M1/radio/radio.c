@@ -21,6 +21,7 @@
 #include "hal/cntr.h"
 #include "hal/ticker.h"
 #include "hal/swi.h"
+#include "hal/debug.h"
 #include "fsl_cau3_ble.h"	/* must be after irq.h */
 
 
@@ -111,12 +112,40 @@ static void get_isr_latency(void)
 	irq_disable(LL_RADIO_IRQn_2nd_lvl);
 }
 
+#define BT_L2CAP_CID_SMP		0x0006
+
+struct bt_l2cap_hdr {
+	u16_t len;
+	u16_t cid;
+} __packed;
+
+struct bt_smp_hdr {
+	u8_t  code;
+} __packed;
+
+struct pdu_data_lldata {
+	struct bt_l2cap_hdr l2cap;
+	struct bt_smp_hdr smp;
+} __packed;
+
+#define PACKET_LOG_SIZE 900
+struct {
+	u32_t tmr;
+	u8_t code;
+	u8_t chan;
+	u8_t hdr;
+	u8_t len;
+	u8_t rx;
+} packet_log[PACKET_LOG_SIZE];
+int packet_log_idx = PACKET_LOG_SIZE;
+
 static void pkt_rx(void)
 {
 	u32_t len, idx;
 	u16_t *rxb = (u16_t *)rx_pkt_ptr, tmp;
 	volatile u16_t *pb = &GENFSK->PACKET_BUFFER[PB_RX_PDU];
 	volatile const u32_t *sts = &GENFSK->XCVR_STS;
+	struct pdu_data *rx_pdu = (struct pdu_data *)rxb;
 
 	/* payload length */
 	len = (GENFSK->XCVR_CTRL & GENFSK_XCVR_CTRL_LENGTH_EXT_MASK) >>
@@ -171,6 +200,26 @@ static void pkt_rx(void)
 		rx_pkt_ptr[len - 1] =  ((u8_t *)&tmp)[0];
 	}
 
+	if (packet_log_idx < PACKET_LOG_SIZE &&
+			GENFSK->CHANNEL_NUM != 42 && GENFSK->CHANNEL_NUM != 66 &&
+			GENFSK->CHANNEL_NUM != 120) {
+		if (rx_pdu->ll_id == PDU_DATA_LLID_CTRL) {
+			packet_log[packet_log_idx].code = rx_pdu->llctrl.opcode;
+		/* Check for L2CAP data PDU */
+		} else if (rx_pdu->lldata[offsetof(struct pdu_data_lldata, l2cap.cid)] == BT_L2CAP_CID_SMP) {
+			packet_log[packet_log_idx].code =
+					rx_pdu->lldata[offsetof(struct pdu_data_lldata, smp.code)];
+		}
+		packet_log[packet_log_idx].rx = 1;
+		packet_log[packet_log_idx].chan = GENFSK->CHANNEL_NUM;
+		packet_log[packet_log_idx].hdr = *(u8_t *)rx_pdu;
+		packet_log[packet_log_idx].len = rx_pdu->len;
+
+		if (rx_pdu->len) {
+			packet_log_idx++;
+		}
+	}
+
 	force_bad_crc = 0;
 }
 
@@ -196,6 +245,10 @@ void isr_radio(void *arg)
 	}
 
 	if (irq & GENFSK_IRQ_CTRL_RX_WATERMARK_IRQ_MASK) {
+		if (packet_log_idx < PACKET_LOG_SIZE) {
+			RISCV_READ_CYCLES(packet_log[packet_log_idx].tmr);
+		}
+
 		/* Disable Rx timeout */
 		/* 0b1010..RX Cancel -- Cancels pending RX events but do not
 		 *			abort a RX-in-progress
@@ -328,6 +381,7 @@ static void hpmcal_disable(void)
 
 void radio_setup(void)
 {
+	RISCV_WRITE_PCER(RI5CY_PCER_CYCLES);
 	CAU3_Init(CAU3);
 	XCVR_Init(GFSK_BT_0p5_h_0p5, DR_1MBPS);
 	XCVR_SetXtalTrim(41);
@@ -549,9 +603,44 @@ void radio_pkt_tx_set(void *tx_packet)
 	u16_t *pkt = tx_packet;
 	u32_t cnt = 0, pkt_len = (((u8_t *)tx_packet)[1] + 1) / 2 + 1;
 	volatile u16_t *pkt_buffer = &GENFSK->PACKET_BUFFER[PB_TX_PDU];
+	struct pdu_data *tx_pdu = (struct pdu_data *)tx_packet;
+	u8_t channel = GENFSK->CHANNEL_NUM & 0xFF;
 
+	if (*(u8_t *)tx_pdu == 64 && channel != 42 && channel != 66 &&
+			channel != 120)
+		while(1);
+
+//	pkt_len = (pkt_len < 31) ? 31 : pkt_len;
 	for (; cnt < pkt_len; cnt++) {
 		pkt_buffer[cnt] = pkt[cnt];
+	}
+
+	if (packet_log_idx < PACKET_LOG_SIZE &&
+			channel != 42 && channel != 66 &&
+			channel != 120) {
+		if (packet_log[packet_log_idx].rx == 0 &&
+		    packet_log[packet_log_idx].hdr == *(u8_t *)tx_pdu &&
+		    (packet_log[packet_log_idx].len + 4) == tx_pdu->len &&
+		    packet_log[packet_log_idx].tmr == 0) {
+			/* The opcode info was saved before encryption */
+		} else {
+			if (tx_pdu->ll_id == PDU_DATA_LLID_CTRL) {
+				packet_log[packet_log_idx].code = tx_pdu->llctrl.opcode;
+			/* Check for L2CAP data PDU */
+			} else if (tx_pdu->lldata[offsetof(struct pdu_data_lldata, l2cap.cid)] == BT_L2CAP_CID_SMP) {
+				packet_log[packet_log_idx].code =
+						tx_pdu->lldata[offsetof(struct pdu_data_lldata, smp.code)];
+			}
+			packet_log[packet_log_idx].rx = 0;
+			packet_log[packet_log_idx].hdr = *(u8_t *)tx_pdu;
+			packet_log[packet_log_idx].len = tx_pdu->len;
+		}
+		RISCV_READ_CYCLES(packet_log[packet_log_idx].tmr);
+		packet_log[packet_log_idx].chan = channel;
+
+		if (tx_pdu->len) {
+			packet_log_idx++;
+		}
 	}
 }
 
@@ -1093,6 +1182,8 @@ void *radio_ccm_tx_pkt_set_ut(struct ccm *ccm, void *pkt)
 	return result;
 }
 
+int encr_pkts = 0;
+
 void *radio_ccm_tx_pkt_set(struct ccm *ccm, void *pkt)
 {
 	u8_t key_local[16] __attribute__((aligned));
@@ -1102,10 +1193,24 @@ void *radio_ccm_tx_pkt_set(struct ccm *ccm, void *pkt)
 	cau3_handle_t handle = {
 			.keySlot = kCAU3_KeySlot2,
 			.taskDone = kCAU3_TaskDonePoll};
+	struct pdu_data *tx_pdu = (struct pdu_data *)pkt;
 
 	/* Test for Empty PDU and bypass encryption */
 	if (((struct pdu_data *)pkt)->len == 0)
 		return pkt;
+
+	if (packet_log_idx < PACKET_LOG_SIZE) {
+		if (tx_pdu->ll_id == PDU_DATA_LLID_CTRL) {
+			packet_log[packet_log_idx].code = tx_pdu->llctrl.opcode;
+		/* Check for L2CAP data PDU */
+		} else if (tx_pdu->lldata[offsetof(struct pdu_data_lldata, l2cap.cid)] == BT_L2CAP_CID_SMP) {
+			packet_log[packet_log_idx].code =
+					tx_pdu->lldata[offsetof(struct pdu_data_lldata, smp.code)];
+		}
+		packet_log[packet_log_idx].rx = 0;
+		packet_log[packet_log_idx].hdr = *(u8_t *)tx_pdu;
+		packet_log[packet_log_idx].len = tx_pdu->len;
+	}
 
 	/* ccm.key[16] is stored in MSO to LSO format, as retrieved from e function */
 	memcpy((u8_t *)key_local, ccm->key, sizeof(key_local));
@@ -1123,6 +1228,8 @@ void *radio_ccm_tx_pkt_set(struct ccm *ccm, void *pkt)
 		return NULL;
 	}
 
+//	((struct pdu_data *)pkt)->len = (((struct pdu_data *)pkt)->len < 31)?
+//					31 : ((struct pdu_data *)pkt)->len;
 	auth_mic = _pkt_scratch + 2 + ((struct pdu_data *)pkt)->len;
 	aad = *(u8_t *)pkt & RADIO_AESCCM_HDR_MASK;
 
@@ -1138,6 +1245,7 @@ void *radio_ccm_tx_pkt_set(struct ccm *ccm, void *pkt)
 	_pkt_scratch[0] = *(u8_t *)pkt;
 	_pkt_scratch[1] = ((struct pdu_data *)pkt)->len + 4;
 
+	encr_pkts++;
 	return _pkt_scratch;
 }
 
@@ -1149,6 +1257,7 @@ u32_t radio_ccm_is_done(void)
 	cau3_handle_t handle = {
 			.keySlot = kCAU3_KeySlot2,
 			.taskDone = kCAU3_TaskDonePoll};
+	struct pdu_data *rx_pdu = (struct pdu_data *)cauv3_ctx_ccm.rx_pkt_ccm_output;
 
 	if (cauv3_ctx_ccm.rx_pkt_ccm_input->len > 4) {
 		auth_mic = (u8_t *)cauv3_ctx_ccm.rx_pkt_ccm_input + 2 +
@@ -1167,6 +1276,24 @@ u32_t radio_ccm_is_done(void)
 		cauv3_ctx_ccm.auth_mic_valid = handle.micPassed;
 		cauv3_ctx_ccm.rx_pkt_ccm_output->len -= 4;
 
+		encr_pkts++;
+
+		if (packet_log_idx < PACKET_LOG_SIZE && packet_log_idx > 0 &&
+		    packet_log[packet_log_idx - 1].rx == 1 &&
+		    packet_log[packet_log_idx - 1].hdr == *(u8_t *)rx_pdu &&
+		    (packet_log[packet_log_idx - 1].len - 4) == rx_pdu->len) {
+			if (rx_pdu->ll_id == PDU_DATA_LLID_CTRL) {
+				packet_log[packet_log_idx - 1].code = rx_pdu->llctrl.opcode;
+			/* Check for L2CAP data PDU */
+			} else if (rx_pdu->lldata[offsetof(struct pdu_data_lldata, l2cap.cid)] == BT_L2CAP_CID_SMP) {
+				packet_log[packet_log_idx - 1].code =
+						rx_pdu->lldata[offsetof(struct pdu_data_lldata, smp.code)];
+			}
+			packet_log[packet_log_idx - 1].len = rx_pdu->len;
+			if (packet_log[packet_log_idx - 1].code == 0x13)
+				RISCV_WRITE_CYCLES(0);
+
+		}
 	} else if (cauv3_ctx_ccm.rx_pkt_ccm_input->len == 0) {
 		/* Just copy input into output */
 		*cauv3_ctx_ccm.rx_pkt_ccm_output = *cauv3_ctx_ccm.rx_pkt_ccm_input;

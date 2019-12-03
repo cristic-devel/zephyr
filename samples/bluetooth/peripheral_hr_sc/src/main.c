@@ -29,6 +29,18 @@ static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_UUID16_ALL, 0x0d, 0x18, 0x0f, 0x18, 0x05, 0x18),
 };
 
+extern int encr_pkts;
+extern int packet_log_idx;
+#define PACKET_LOG_SIZE 900
+extern struct {
+	u32_t tmr;
+	u8_t code;
+	u8_t chan;
+	u8_t hdr;
+	u8_t len;
+	u8_t rx;
+} packet_log[PACKET_LOG_SIZE];
+
 static void connected(struct bt_conn *conn, u8_t err)
 {
 	char addr[BT_ADDR_LE_STR_LEN];
@@ -49,12 +61,43 @@ static void connected(struct bt_conn *conn, u8_t err)
 
 static void disconnected(struct bt_conn *conn, u8_t reason)
 {
+	int i;
 	printk("Disconnected (reason 0x%02x)\n", reason);
+	printk("encr pkts = %d log %d\n", encr_pkts, packet_log_idx);
+	printk("time:Rx:chan:hdr:len:code\n");
+	for (i = 0; i < packet_log_idx;) {
+		printk("%ud:%c:%d:%d:%d:%d-",
+				packet_log[i].tmr, packet_log[i].rx ? 'R' : 'T',
+				packet_log[i].chan, packet_log[i].hdr,
+				packet_log[i].len, packet_log[i].code);
+		i++;
+		printk("%ud:%c:%d:%d:%d:%d-",
+				packet_log[i].tmr, packet_log[i].rx ? 'R' : 'T',
+				packet_log[i].chan, packet_log[i].hdr,
+				packet_log[i].len, packet_log[i].code);
+		i++;
+		printk("%ud:%c:%d:%d:%d:%d-",
+				packet_log[i].tmr, packet_log[i].rx ? 'R' : 'T',
+				packet_log[i].chan, packet_log[i].hdr,
+				packet_log[i].len, packet_log[i].code);
+		i++;
+		printk("%ud:%c:%d:%d:%d:%d-",
+				packet_log[i].tmr, packet_log[i].rx ? 'R' : 'T',
+				packet_log[i].chan, packet_log[i].hdr,
+				packet_log[i].len, packet_log[i].code);
+		i++;
+		printk("%ud:%c:%d:%d:%d:%d\n",
+				packet_log[i].tmr, packet_log[i].rx ? 'R' : 'T',
+				packet_log[i].chan, packet_log[i].hdr,
+				packet_log[i].len, packet_log[i].code);
+		i++;
+	}
 
 	if (default_conn) {
 		bt_conn_unref(default_conn);
 		default_conn = NULL;
 	}
+	encr_pkts = 0;
 }
 
 static void security_changed(struct bt_conn *conn, bt_security_t level,
@@ -117,6 +160,7 @@ static void auth_cancel(struct bt_conn *conn)
 static void pairing_complete(struct bt_conn *conn, bool bonded)
 {
 	printk("Pairing Complete\n");
+	packet_log_idx = 0;
 }
 
 static void pairing_failed(struct bt_conn *conn, enum bt_security_err reason)

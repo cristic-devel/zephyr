@@ -175,3 +175,19 @@ extern struct device *vega_debug_portd;
 #define DEBUG_RADIO_CLOSE_M(flag)
 
 #endif
+
+#define RI5CY_PCMR_SATEN	0x2
+#define RI5CY_PCMR_GLOEN	0x1
+#define RI5CY_PCER_CYCLES	0x1
+
+#define RISCV_READ_PCER(val) \
+	__asm__ volatile ("csrr %0, 0x7A0" : "=r" (val))
+#define RISCV_WRITE_PCER(val) \
+	__asm__ volatile ("csrw 0x7A0, %0" :      : "r" (val))
+#define RISCV_READ_PCMR(val) \
+	__asm__ volatile ("csrr %0, 0x7A1" : "=r" (val))
+
+#define RISCV_READ_CYCLES(cycles) \
+	__asm__ volatile ("csrr %0, 0x780" : "=r" (cycles))
+#define RISCV_WRITE_CYCLES(cycles) \
+	__asm__ volatile ("csrw 0x780, %0" :      : "r" (cycles))

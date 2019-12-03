@@ -162,6 +162,8 @@ static int prepare_cb(struct lll_prepare_param *prepare_param)
 	/* TODO: other Tx Power settings */
 	radio_tx_power_set(RADIO_TXP_DEFAULT);
 
+	lll_chan_set(data_chan_use);
+
 	lll_conn_rx_pkt_set(lll);
 
 	radio_aa_set(lll->access_addr);
@@ -169,8 +171,6 @@ static int prepare_cb(struct lll_prepare_param *prepare_param)
 			    (((u32_t)lll->crc_init[2] << 16) |
 			     ((u32_t)lll->crc_init[1] << 8) |
 			     ((u32_t)lll->crc_init[0])));
-
-	lll_chan_set(data_chan_use);
 
 	radio_isr_set(lll_conn_isr_rx, lll);
 

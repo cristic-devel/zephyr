@@ -603,6 +603,13 @@ static void chan_prepare(struct lll_adv *lll)
 	ARG_UNUSED(upd);
 #endif /* !CONFIG_BT_CTLR_PRIVACY */
 
+	chan = find_lsb_set(lll->chan_map_curr);
+	LL_ASSERT(chan);
+
+	lll->chan_map_curr &= (lll->chan_map_curr - 1);
+
+	lll_chan_set(36 + chan);
+
 	radio_pkt_tx_set(pdu);
 
 	if ((pdu->type != PDU_ADV_TYPE_NONCONN_IND) &&
@@ -615,13 +622,6 @@ static void chan_prepare(struct lll_adv *lll)
 		radio_isr_set(isr_done, lll);
 		radio_switch_complete_and_disable();
 	}
-
-	chan = find_lsb_set(lll->chan_map_curr);
-	LL_ASSERT(chan);
-
-	lll->chan_map_curr &= (lll->chan_map_curr - 1);
-
-	lll_chan_set(36 + chan);
 }
 
 static inline int isr_rx_pdu(struct lll_adv *lll,
