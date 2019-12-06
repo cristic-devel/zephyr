@@ -2012,6 +2012,7 @@ bool ticker_is_initialized(u8_t instance_index)
 void ticker_trigger(u8_t instance_index)
 {
 	struct ticker_instance *instance;
+	static int cnt;
 
 	DEBUG_TICKER_ISR(1);
 
@@ -2019,6 +2020,11 @@ void ticker_trigger(u8_t instance_index)
 	if (instance->sched_cb) {
 		instance->sched_cb(TICKER_CALL_ID_TRIGGER,
 				   TICKER_CALL_ID_WORKER, 1, instance);
+	}
+
+	if (cnt != instance->count_node) {
+		cnt = instance->count_node;
+		printk("tick %d\n", instance->count_node);
 	}
 
 	DEBUG_TICKER_ISR(0);

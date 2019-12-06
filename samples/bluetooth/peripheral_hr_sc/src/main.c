@@ -66,27 +66,27 @@ static void disconnected(struct bt_conn *conn, u8_t reason)
 	printk("encr pkts = %d log %d\n", encr_pkts, packet_log_idx);
 	printk("time:Rx:chan:hdr:len:code\n");
 	for (i = 0; i < packet_log_idx;) {
-		printk("%ud:%c:%d:%d:%d:%d-",
+		printk("%u:%c:%d:%d:%d:%d-",
 				packet_log[i].tmr, packet_log[i].rx ? 'R' : 'T',
 				packet_log[i].chan, packet_log[i].hdr,
 				packet_log[i].len, packet_log[i].code);
 		i++;
-		printk("%ud:%c:%d:%d:%d:%d-",
+		printk("%u:%c:%d:%d:%d:%d-",
 				packet_log[i].tmr, packet_log[i].rx ? 'R' : 'T',
 				packet_log[i].chan, packet_log[i].hdr,
 				packet_log[i].len, packet_log[i].code);
 		i++;
-		printk("%ud:%c:%d:%d:%d:%d-",
+		printk("%u:%c:%d:%d:%d:%d-",
 				packet_log[i].tmr, packet_log[i].rx ? 'R' : 'T',
 				packet_log[i].chan, packet_log[i].hdr,
 				packet_log[i].len, packet_log[i].code);
 		i++;
-		printk("%ud:%c:%d:%d:%d:%d-",
+		printk("%u:%c:%d:%d:%d:%d-",
 				packet_log[i].tmr, packet_log[i].rx ? 'R' : 'T',
 				packet_log[i].chan, packet_log[i].hdr,
 				packet_log[i].len, packet_log[i].code);
 		i++;
-		printk("%ud:%c:%d:%d:%d:%d\n",
+		printk("%u:%c:%d:%d:%d:%d\n",
 				packet_log[i].tmr, packet_log[i].rx ? 'R' : 'T',
 				packet_log[i].chan, packet_log[i].hdr,
 				packet_log[i].len, packet_log[i].code);
@@ -157,10 +157,14 @@ static void auth_cancel(struct bt_conn *conn)
 	printk("Pairing cancelled: %s\n", addr);
 }
 
+#define RISCV_WRITE_CYCLES(cycles) \
+	__asm__ volatile ("csrw 0x780, %0" :      : "r" (cycles))
+
 static void pairing_complete(struct bt_conn *conn, bool bonded)
 {
 	printk("Pairing Complete\n");
 	packet_log_idx = 0;
+	RISCV_WRITE_CYCLES(0);
 }
 
 static void pairing_failed(struct bt_conn *conn, enum bt_security_err reason)

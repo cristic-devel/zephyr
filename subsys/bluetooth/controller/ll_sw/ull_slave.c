@@ -105,7 +105,7 @@ void ull_slave_setup(memq_link_t *link, struct node_rx_hdr *rx,
 
 #if defined(CONFIG_BT_CTLR_LE_PING)
 	/* APTO in no. of connection events */
-	conn->apto_reload = RADIO_CONN_EVENTS((30 * 1000 * 1000),
+	conn->apto_reload = RADIO_CONN_EVENTS((5 * 1000 * 1000),
 					      conn_interval_us);
 	/* Dispatch LE Ping PDU 6 connection events (that peer would
 	 * listen to) before 30s timeout

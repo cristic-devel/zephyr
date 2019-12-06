@@ -172,7 +172,7 @@ u8_t ll_create_connection(u16_t scan_interval, u16_t scan_window,
 #if defined(CONFIG_BT_CTLR_LE_PING)
 	conn->apto_expire = 0U;
 	/* APTO in no. of connection events */
-	conn->apto_reload = RADIO_CONN_EVENTS((30000000), conn_interval_us);
+	conn->apto_reload = RADIO_CONN_EVENTS((5000000), conn_interval_us);
 	conn->appto_expire = 0U;
 	/* Dispatch LE Ping PDU 6 connection events (that peer would listen to)
 	 * before 30s timeout

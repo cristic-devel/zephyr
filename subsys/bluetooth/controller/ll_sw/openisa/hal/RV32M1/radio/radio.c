@@ -79,9 +79,11 @@ static u8_t MALIGN(4) _pkt_scratch[
 			(RADIO_PDU_LEN_MAX + 3) : PDU_AC_SIZE_MAX];
 
 static s8_t rssi;
+int cau_used = 0;
+int cau_last_used = 0;
 
 static struct {
-	u64_t nonce[2];
+	u64_t rx_nonce[2];
 	struct pdu_data *rx_pkt_ccm_output;
 	struct pdu_data *rx_pkt_ccm_input;
 	int auth_mic_valid;
@@ -129,6 +131,7 @@ struct pdu_data_lldata {
 } __packed;
 
 #define PACKET_LOG_SIZE 900
+#define PACKET_DETAIL_LOG_SIZE 30
 struct {
 	u32_t tmr;
 	u8_t code;
@@ -138,6 +141,7 @@ struct {
 	u8_t rx;
 } packet_log[PACKET_LOG_SIZE];
 int packet_log_idx = PACKET_LOG_SIZE;
+int packet_detail_log_cnt = PACKET_DETAIL_LOG_SIZE;
 
 static void pkt_rx(void)
 {
@@ -155,6 +159,7 @@ static void pkt_rx(void)
 		/* Unexpected size */
 		force_bad_crc = 1;
 		next_radio_cmd = 0;
+		cau_used = 0;
 		while (*sts & GENFSK_XCVR_STS_RX_IN_PROGRESS_MASK) {
 		}
 		return;
@@ -186,8 +191,14 @@ static void pkt_rx(void)
 	while (*sts & GENFSK_XCVR_STS_RX_IN_PROGRESS_MASK) {
 	}
 
-	if (cauv3_ctx_ccm.rx_pkt_ccm_output)
+	if (cauv3_ctx_ccm.rx_pkt_ccm_output) {
 		*(u16_t *)cauv3_ctx_ccm.rx_pkt_ccm_output = pb[0];
+		if (len < 4) {
+			cau_used = 0;
+			cauv3_ctx_ccm.rx_pkt_ccm_output = 0;
+			cauv3_ctx_ccm.rx_pkt_ccm_input = 0;
+		}
+	}
 
 	/* Copy the PDU */
 	for (idx = 0; idx < len / 2; idx++) {
@@ -215,8 +226,9 @@ static void pkt_rx(void)
 		packet_log[packet_log_idx].hdr = *(u8_t *)rx_pdu;
 		packet_log[packet_log_idx].len = rx_pdu->len;
 
-		if (rx_pdu->len) {
+		if (packet_detail_log_cnt < PACKET_DETAIL_LOG_SIZE || rx_pdu->len) {
 			packet_log_idx++;
+			packet_detail_log_cnt++;
 		}
 	}
 
@@ -276,6 +288,9 @@ void isr_radio(void *arg)
 	}
 
 	if (irq & GENFSK_IRQ_CTRL_T2_IRQ_MASK) {
+		if (!radio_trx) {
+			cau_used = 0;
+		}
 		GENFSK->IRQ_CTRL &= (IRQ_MASK | GENFSK_IRQ_CTRL_T2_IRQ_MASK);
 		/* Disable both comparators */
 		GENFSK->T1_CMP &= ~GENFSK_T1_CMP_T1_CMP_EN_MASK;
@@ -303,6 +318,8 @@ void radio_isr_set(radio_isr_cb_t cb, void *param)
 
 	/* Clear pending interrupts */
 	GENFSK->IRQ_CTRL &= 0xffffffff;
+	EVENT_UNIT->INTPTPENDCLEAR = (u32_t)(1U << LL_RADIO_IRQn);
+
 	irq_enable(LL_RADIO_IRQn_2nd_lvl);
 }
 
@@ -618,6 +635,12 @@ void radio_pkt_tx_set(void *tx_packet)
 	if (packet_log_idx < PACKET_LOG_SIZE &&
 			channel != 42 && channel != 66 &&
 			channel != 120) {
+		if (packet_log_idx > 0 && packet_log[packet_log_idx - 1].rx == 0 &&
+			packet_log[packet_log_idx - 1].hdr == *(u8_t *)tx_pdu &&
+			(packet_log[packet_log_idx - 1].len + 4) == tx_pdu->len &&
+			packet_log[packet_log_idx - 1].tmr == 0) {
+			packet_log_idx--;
+		}
 		if (packet_log[packet_log_idx].rx == 0 &&
 		    packet_log[packet_log_idx].hdr == *(u8_t *)tx_pdu &&
 		    (packet_log[packet_log_idx].len + 4) == tx_pdu->len &&
@@ -638,8 +661,9 @@ void radio_pkt_tx_set(void *tx_packet)
 		RISCV_READ_CYCLES(packet_log[packet_log_idx].tmr);
 		packet_log[packet_log_idx].chan = channel;
 
-		if (tx_pdu->len) {
+		if (packet_detail_log_cnt < PACKET_DETAIL_LOG_SIZE || tx_pdu->len) {
 			packet_log_idx++;
+			packet_detail_log_cnt++;
 		}
 	}
 }
@@ -715,6 +739,9 @@ u32_t radio_is_ready(void)
 
 u32_t radio_is_done(void)
 {
+	if (!radio_trx) {
+		cau_used = 0;
+	}
 	return radio_trx;
 }
 
@@ -766,6 +793,9 @@ u32_t radio_crc_is_valid(void)
 
 	u32_t radio_crc = (GENFSK->XCVR_STS & GENFSK_XCVR_STS_CRC_VALID_MASK) >>
 						GENFSK_XCVR_STS_CRC_VALID_SHIFT;
+	if (!radio_crc) {
+		cau_used = 0;
+	}
 	return radio_crc;
 }
 
@@ -1114,13 +1144,21 @@ void *radio_ccm_rx_pkt_set(struct ccm *ccm, u8_t phy, void *pkt)
 	cauv3_ctx_ccm.auth_mic_valid = 0;
 	cauv3_ctx_ccm.rx_pkt_ccm_input = (struct pdu_data *)_pkt_scratch;
 	cauv3_ctx_ccm.rx_pkt_ccm_output = (struct pdu_data *)pkt;
-	cauv3_ctx_ccm.nonce[0] = ccm->counter;	/* LSO to MSO, counter is LE */
+	cauv3_ctx_ccm.rx_nonce[0] = ccm->counter;	/* LSO to MSO, counter is LE */
 	/* The directionBit shall be set to 1 for Data Physical Channel PDUs sent by
 	 * the master and set to 0 for Data Physical Channel PDUs sent by the slave.
 	 * */
-	*((u8_t *)cauv3_ctx_ccm.nonce + 4) |= ccm->direction << 7;
-	memcpy((u8_t *)cauv3_ctx_ccm.nonce + 5, ccm->iv, 8); /* LSO to MSO */
+	*((u8_t *)cauv3_ctx_ccm.rx_nonce + 4) |= ccm->direction << 7;
+	memcpy((u8_t *)cauv3_ctx_ccm.rx_nonce + 5, ccm->iv, 8); /* LSO to MSO */
 
+	if (cau_used) {
+		int cyc;
+		RISCV_READ_CYCLES(cyc);
+		printk("rx: %u CAU already USED by %d at %u\n", cyc, cau_used, cau_last_used);
+	} else {
+		cau_used = 1;
+		RISCV_READ_CYCLES(cau_last_used);
+	}
 	/* Loads the key into CAU3's DMEM memory and expands the AES key schedule. */
 	status = CAU3_AES_SetKey(CAU3, &handle, key_local, 16);
 	if (status != kStatus_Success) {
@@ -1187,6 +1225,7 @@ int encr_pkts = 0;
 void *radio_ccm_tx_pkt_set(struct ccm *ccm, void *pkt)
 {
 	u8_t key_local[16] __attribute__((aligned));
+	u64_t nonce[2];
 	u8_t aad;
 	u8_t *auth_mic;
 	status_t status;
@@ -1210,16 +1249,27 @@ void *radio_ccm_tx_pkt_set(struct ccm *ccm, void *pkt)
 		packet_log[packet_log_idx].rx = 0;
 		packet_log[packet_log_idx].hdr = *(u8_t *)tx_pdu;
 		packet_log[packet_log_idx].len = tx_pdu->len;
+
+		packet_log_idx++;
 	}
 
 	/* ccm.key[16] is stored in MSO to LSO format, as retrieved from e function */
 	memcpy((u8_t *)key_local, ccm->key, sizeof(key_local));
-	cauv3_ctx_ccm.nonce[0] = ccm->counter;	/* LSO to MSO, counter is LE */
+	nonce[0] = ccm->counter;	/* LSO to MSO, counter is LE */
 	/* The directionBit shall be set to 1 for Data Physical Channel PDUs sent by
 	 * the master and set to 0 for Data Physical Channel PDUs sent by the slave.
 	 * */
-	*((u8_t *)cauv3_ctx_ccm.nonce + 4) |= ccm->direction << 7;
-	memcpy((u8_t *)cauv3_ctx_ccm.nonce + 5, ccm->iv, 8); /* LSO to MSO */
+	*((u8_t *)nonce + 4) |= ccm->direction << 7;
+	memcpy((u8_t *)nonce + 5, ccm->iv, 8); /* LSO to MSO */
+
+	if (cau_used) {
+		int cyc;
+		RISCV_READ_CYCLES(cyc);
+		printk("tx: %u CAU already USED by %d at %u\n", cyc, cau_used, cau_last_used);
+	} else {
+		cau_used = 2;
+		RISCV_READ_CYCLES(cau_last_used);
+	}
 
 	/* Loads the key into CAU3's DMEM memory and expands the AES key schedule. */
 	status = CAU3_AES_SetKey(CAU3, &handle, key_local, 16);
@@ -1236,7 +1286,7 @@ void *radio_ccm_tx_pkt_set(struct ccm *ccm, void *pkt)
 	status = CAU3_AES_CCM_EncryptTag(CAU3, &handle,
 						 (u8_t *)pkt + 2, ((struct pdu_data *)pkt)->len,
 						 _pkt_scratch + 2,
-						 (const u8_t *)cauv3_ctx_ccm.nonce, 13,
+						 (const u8_t *)nonce, 13,
 						 &aad, 1, auth_mic, 4);
 	if (status != kStatus_Success) {
 		printk("CAUv3 AES CCM decrypt failed %d", status);
@@ -1246,6 +1296,8 @@ void *radio_ccm_tx_pkt_set(struct ccm *ccm, void *pkt)
 	_pkt_scratch[1] = ((struct pdu_data *)pkt)->len + 4;
 
 	encr_pkts++;
+	cau_used = 0;
+
 	return _pkt_scratch;
 }
 
@@ -1259,7 +1311,10 @@ u32_t radio_ccm_is_done(void)
 			.taskDone = kCAU3_TaskDonePoll};
 	struct pdu_data *rx_pdu = (struct pdu_data *)cauv3_ctx_ccm.rx_pkt_ccm_output;
 
-	if (cauv3_ctx_ccm.rx_pkt_ccm_input->len > 4) {
+	if (cauv3_ctx_ccm.rx_pkt_ccm_input && cauv3_ctx_ccm.rx_pkt_ccm_input->len > 4) {
+		if (cau_used != 1) {
+			printk("rx: CAU wrong state %d\n", cau_used);
+		}
 		auth_mic = (u8_t *)cauv3_ctx_ccm.rx_pkt_ccm_input + 2 +
 				cauv3_ctx_ccm.rx_pkt_ccm_input->len - 4;
 		aad = *(u8_t *)cauv3_ctx_ccm.rx_pkt_ccm_input & RADIO_AESCCM_HDR_MASK;
@@ -1267,7 +1322,7 @@ u32_t radio_ccm_is_done(void)
 							(u8_t *)cauv3_ctx_ccm.rx_pkt_ccm_input + 2,
 							(u8_t *)cauv3_ctx_ccm.rx_pkt_ccm_output + 2,
 							cauv3_ctx_ccm.rx_pkt_ccm_input->len - 4,
-							(const u8_t *)cauv3_ctx_ccm.nonce, 13,
+							(const u8_t *)cauv3_ctx_ccm.rx_nonce, 13,
 							&aad, 1, auth_mic, 4);
 		if (status != kStatus_Success) {
 			printk("CAUv3 AES CCM decrypt failed %d", status);
@@ -1277,6 +1332,7 @@ u32_t radio_ccm_is_done(void)
 		cauv3_ctx_ccm.rx_pkt_ccm_output->len -= 4;
 
 		encr_pkts++;
+		cau_used = 0;
 
 		if (packet_log_idx < PACKET_LOG_SIZE && packet_log_idx > 0 &&
 		    packet_log[packet_log_idx - 1].rx == 1 &&
@@ -1290,14 +1346,17 @@ u32_t radio_ccm_is_done(void)
 						rx_pdu->lldata[offsetof(struct pdu_data_lldata, smp.code)];
 			}
 			packet_log[packet_log_idx - 1].len = rx_pdu->len;
-			if (packet_log[packet_log_idx - 1].code == 0x13)
+			if (packet_log[packet_log_idx - 1].code == 0x13) {
 				RISCV_WRITE_CYCLES(0);
+				packet_detail_log_cnt = 0;
+			}
 
 		}
 	} else if (cauv3_ctx_ccm.rx_pkt_ccm_input->len == 0) {
 		/* Just copy input into output */
 		*cauv3_ctx_ccm.rx_pkt_ccm_output = *cauv3_ctx_ccm.rx_pkt_ccm_input;
 		cauv3_ctx_ccm.auth_mic_valid = 1;
+		cau_used = 0;
 	} else {
 		while(1); // only 0, not 1,2,3,4
 	}
