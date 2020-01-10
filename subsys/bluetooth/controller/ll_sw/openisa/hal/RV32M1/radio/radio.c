@@ -10,6 +10,7 @@
 #include <sys/dlist.h>
 #include <sys/mempool_base.h>
 #include <toolchain.h>
+#include <irq.h>
 
 #include "util/mem.h"
 #include "hal/ccm.h"
@@ -17,7 +18,6 @@
 #include "ll_sw/pdu.h"
 
 #include "fsl_xcvr.h"
-#include "irq.h"
 #include "hal/cntr.h"
 #include "hal/ticker.h"
 #include "hal/swi.h"
@@ -41,7 +41,7 @@ static void *isr_cb_param;
 #define PB_RX 544	/* half of PB (packet buffer) */
 
 /* The PDU in packet buffer starts after the Access Address which is 4 octets */
-#define PB_RX_PDU (PB_RX + 2)	/* Rx PDU offset (in halfwords) in PB */
+#define PB_RX_PDU (PB_RX + 0)	/* Rx PDU offset (in halfwords) in PB */
 #define PB_TX_PDU 2		/* Tx PDU offset (in halfwords) in packet
 				 * buffer
 				 */
@@ -158,14 +158,16 @@ static void pkt_rx(void)
 	while (*sts & GENFSK_XCVR_STS_RX_IN_PROGRESS_MASK) {
 	}
 
+#ifdef CONFIG_BT_CTLR_LE_ENC
 	if (cauv3_ctx_ccm.rx_pkt_out) {
 		*(u16_t *)cauv3_ctx_ccm.rx_pkt_out = pb[0];
-		if (len < 4) {
+		if (len < CAU3_BLE_MIC_SIZE) {
 			cauv3_ctx_ccm.rx_pkt_out = 0;
 			cauv3_ctx_ccm.rx_pkt_in = 0;
 			cauv3_ctx_ccm.empty_pdu_rxed = 1;
 		}
 	}
+#endif
 
 	/* Copy the PDU */
 	for (idx = 0; idx < len / 2; idx++) {
@@ -224,7 +226,7 @@ void isr_radio(void *arg)
 		if (tmr_end_save) {
 			tmr_end = isr_tmr_end;	/* from pkt_rx() */
 		}
-		radio_trx = 1;
+		radio_trx = 2;
 		rssi = (GENFSK->XCVR_STS & GENFSK_XCVR_STS_RSSI_MASK) >>
 					GENFSK_XCVR_STS_RSSI_SHIFT;
 	}
@@ -335,7 +337,9 @@ static void hpmcal_disable(void)
 
 void radio_setup(void)
 {
+#ifdef CONFIG_BT_CTLR_LE_ENC
 	CAU3_Init(CAU3);
+#endif
 	XCVR_Init(GFSK_BT_0p5_h_0p5, DR_1MBPS);
 	XCVR_SetXtalTrim(41);
 
@@ -633,6 +637,38 @@ u32_t radio_is_ready(void)
 
 u32_t radio_is_done(void)
 {
+	u32_t i;
+	u8_t *rxb = rx_pkt_ptr;
+
+	if (radio_trx == 2) {
+		printk("pkt rx: ");
+		for (i = 0; i < 40; i += 4) {
+			union {
+				struct {
+					u8_t b1;
+					u8_t b2;
+					u8_t b3;
+					u8_t b4;
+				};
+				u32_t all;
+			} endian_swap = {
+					.b4 = rxb[i],
+					.b3 = rxb[i+1],
+					.b2 = rxb[i+2],
+					.b1 = rxb[i+3]
+			};
+			u32_t *clean = (u32_t *)&rxb[i];
+
+			printk("%08x", endian_swap.all);
+			*clean = 0;
+		}
+		if (radio_crc_is_valid()) {
+			printk("  crc ok\n");
+		} else {
+			printk("  crc bad\n");
+		}
+	}
+
 	return radio_trx;
 }
 
